@@ -1,0 +1,18 @@
+{
+  "name": "Myrvo.FlowGraph.Editor",
+  "rootNamespace": "Myrvo.FlowGraph.Editor",
+  "references": [
+    "Myrvo.FlowGraph.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
