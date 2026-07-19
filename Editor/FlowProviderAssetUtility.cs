@@ -1,4 +1,3 @@
-using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -148,14 +147,47 @@ namespace Myrvo.FlowGraph.Editor
 
         private static void EnsureFolder(string assetPath)
         {
-            string directory = Path.GetDirectoryName(assetPath);
+            string directory = GetAssetDirectory(assetPath);
             if (string.IsNullOrWhiteSpace(directory) || AssetDatabase.IsValidFolder(directory))
             {
                 return;
             }
 
-            Directory.CreateDirectory(directory);
-            AssetDatabase.Refresh();
+            EnsureFolderHierarchy(directory);
+        }
+
+        private static string GetAssetDirectory(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath))
+            {
+                return string.Empty;
+            }
+
+            string normalizedPath = assetPath.Replace('\\', '/');
+            int separatorIndex = normalizedPath.LastIndexOf('/');
+            return separatorIndex <= 0 ? string.Empty : normalizedPath.Substring(0, separatorIndex);
+        }
+
+        private static void EnsureFolderHierarchy(string assetDirectory)
+        {
+            string[] folders = assetDirectory.Split('/');
+            if (folders.Length == 0 || folders[0] != "Assets")
+            {
+                return;
+            }
+
+            string currentPath = folders[0];
+            for (int index = 1; index < folders.Length; index++)
+            {
+                string folderName = folders[index];
+                string nextPath = currentPath + "/" + folderName;
+                if (!AssetDatabase.IsValidFolder(nextPath))
+                {
+                    AssetDatabase.CreateFolder(currentPath, folderName);
+                }
+
+                currentPath = nextPath;
+            }
         }
     }
 }
