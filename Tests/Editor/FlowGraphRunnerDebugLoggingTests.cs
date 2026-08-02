@@ -66,6 +66,80 @@ namespace Myrvo.FlowGraph.Tests
             }
         }
 
+        [Test]
+        public void ExecuteNode_RunsNonCacheableNodeWhenInputsAreUnchanged()
+        {
+            FlowGraphAsset graphAsset = ScriptableObject.CreateInstance<FlowGraphAsset>();
+            try
+            {
+                NonCacheableNodeModel node = graphAsset.CreateNode<NonCacheableNodeModel>(Vector2.zero);
+                FlowGraphRunner runner = new FlowGraphRunner(graphAsset);
+
+                LogAssert.Expect(LogType.Log, new Regex(@"\[FlowGraph\] Executing node 'Non-cacheable Node'.*non-cacheable", RegexOptions.Singleline));
+                runner.ExecuteNode(node);
+
+                LogAssert.Expect(LogType.Log, new Regex(@"\[FlowGraph\] Executing node 'Non-cacheable Node'.*non-cacheable", RegexOptions.Singleline));
+                runner.ExecuteNode(node);
+
+                Assert.That(node.ExecutionCount, Is.EqualTo(2));
+            }
+            finally
+            {
+                ScriptableObject.DestroyImmediate(graphAsset);
+            }
+        }
+
+        [Test]
+        public void ExecuteNodeForcedAsync_RunsCacheableTargetWhenOutputsAreCached()
+        {
+            FlowGraphAsset graphAsset = ScriptableObject.CreateInstance<FlowGraphAsset>();
+            try
+            {
+                FlowTextInputNodeModel node = graphAsset.CreateNode<FlowTextInputNodeModel>(Vector2.zero);
+                FlowGraphRunner runner = new FlowGraphRunner(graphAsset);
+                runner.ExecuteNode(node);
+
+                FlowNodeExecutionResult result = runner.ExecuteNodeForcedAsync(node).GetAwaiter().GetResult();
+
+                Assert.That(result.Executed, Is.True);
+            }
+            finally
+            {
+                ScriptableObject.DestroyImmediate(graphAsset);
+            }
+        }
+
+        [Test]
+        public void LockedNode_IgnoresDirtyPropagationAndExecutionUntilUnlocked()
+        {
+            FlowGraphAsset graphAsset = ScriptableObject.CreateInstance<FlowGraphAsset>();
+            try
+            {
+                LockableNodeModel node = graphAsset.CreateNode<LockableNodeModel>(Vector2.zero);
+                FlowGraphRunner runner = new FlowGraphRunner(graphAsset);
+
+                node.LastExecutionSummary = "Frozen output";
+                node.Locked = true;
+                graphAsset.MarkAllNodesDirty();
+                runner.ExecuteNode(node);
+
+                Assert.That(node.Dirty, Is.False);
+                Assert.That(node.Status, Is.EqualTo(FlowNodeExecutionStatus.Success));
+                Assert.That(node.LastExecutionSummary, Is.EqualTo("Frozen output"));
+                Assert.That(node.ExecutionCount, Is.EqualTo(0));
+
+                node.Locked = false;
+                node.Dirty = true;
+                runner.ExecuteNode(node);
+
+                Assert.That(node.ExecutionCount, Is.EqualTo(1));
+            }
+            finally
+            {
+                ScriptableObject.DestroyImmediate(graphAsset);
+            }
+        }
+
         [Serializable]
         private sealed class ThrowingNodeModel : FlowNodeModel
         {
@@ -87,6 +161,61 @@ namespace Myrvo.FlowGraph.Tests
             public override void Execute(FlowExecutionContext context, FlowExecutionServices services)
             {
                 throw new InvalidOperationException("Boom");
+            }
+        }
+
+        [Serializable]
+        private sealed class NonCacheableNodeModel : FlowNodeModel
+        {
+            public int ExecutionCount { get; private set; }
+            public override bool CanReuseCachedOutputs => false;
+
+            public NonCacheableNodeModel()
+            {
+                SetTitle("Non-cacheable Node");
+            }
+
+            protected override IEnumerable<FlowPortDescriptor> DescribeInputs()
+            {
+                yield break;
+            }
+
+            protected override IEnumerable<FlowPortDescriptor> DescribeOutputs()
+            {
+                yield return new FlowPortDescriptor("value", "Value", FlowValueType.Number);
+            }
+
+            public override void Execute(FlowExecutionContext context, FlowExecutionServices services)
+            {
+                ExecutionCount++;
+                services.SetOutputValue(this, "value", ExecutionCount);
+            }
+        }
+
+        [Serializable]
+        private sealed class LockableNodeModel : FlowNodeModel
+        {
+            public int ExecutionCount { get; private set; }
+
+            public LockableNodeModel()
+            {
+                SetTitle("Lockable Node");
+            }
+
+            protected override IEnumerable<FlowPortDescriptor> DescribeInputs()
+            {
+                yield break;
+            }
+
+            protected override IEnumerable<FlowPortDescriptor> DescribeOutputs()
+            {
+                yield return new FlowPortDescriptor("value", "Value", FlowValueType.Number);
+            }
+
+            public override void Execute(FlowExecutionContext context, FlowExecutionServices services)
+            {
+                ExecutionCount++;
+                services.SetOutputValue(this, "value", ExecutionCount);
             }
         }
     }

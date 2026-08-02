@@ -12,13 +12,16 @@ namespace Myrvo.FlowGraph.Editor
 {
     public sealed class FlowGraphEditorWindow : EditorWindow
     {
-        private static readonly Dictionary<string, Texture2D> PreviewTextureCache = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
+        private const double ExecutionUiRefreshIntervalSeconds = 0.1d;
+        private const string StyleSheetPath = "Packages/com.deathbygravitystudio.myrvo/Editor/Styles/MyrvoFlowGraph.uss";
 
         private FlowGraphAsset graphAsset;
         private FlowGraphView graphView;
         private IMGUIContainer inspectorContainer;
+        private SerializedObject graphSerializedObject;
         private FlowGraphExecutionState executionState;
         private bool isExecutingNode;
+        private double nextExecutionUiRefreshTime;
 
         [MenuItem("Window/Myrvo/Flow Graph")]
         public static void OpenWindow()
@@ -48,6 +51,11 @@ namespace Myrvo.FlowGraph.Editor
         {
             rootVisualElement.Clear();
             rootVisualElement.style.flexDirection = FlexDirection.Column;
+            StyleSheet styleSheet = AssetDatabase.LoadAssetAtPath<StyleSheet>(StyleSheetPath);
+            if (styleSheet != null)
+            {
+                rootVisualElement.styleSheets.Add(styleSheet);
+            }
 
             Toolbar toolbar = new Toolbar();
             ObjectField objectField = new ObjectField("Graph")
@@ -113,6 +121,7 @@ namespace Myrvo.FlowGraph.Editor
         private void Load(FlowGraphAsset asset)
         {
             graphAsset = asset;
+            graphSerializedObject = asset == null ? null : new SerializedObject(asset);
             executionState = new FlowGraphExecutionState();
             titleContent = new GUIContent(asset == null ? "Flow Graph" : $"Flow Graph - {asset.name}");
             graphView?.Bind(asset);
@@ -121,7 +130,12 @@ namespace Myrvo.FlowGraph.Editor
 
         private async void ExecuteSelectedNode()
         {
-            if (isExecutingNode || graphAsset == null || graphView?.SelectedNode == null)
+            ExecuteNode(graphView?.SelectedNode);
+        }
+
+        internal async void ExecuteNode(FlowNodeModel node)
+        {
+            if (isExecutingNode || graphAsset == null || node == null)
             {
                 return;
             }
@@ -132,16 +146,12 @@ namespace Myrvo.FlowGraph.Editor
                 EditorApplication.update += RefreshExecutionUi;
 
                 FlowGraphRunner runner = new FlowGraphRunner(graphAsset, executionState);
-                graphView.SelectedNode.Status = FlowNodeExecutionStatus.Running;
-                graphView.RefreshNodeViews();
-                inspectorContainer?.MarkDirtyRepaint();
-                Repaint();
+                node.Status = FlowNodeExecutionStatus.Running;
+                RefreshGraphUi(true);
 
-                await runner.ExecuteNodeAsync(graphView.SelectedNode);
+                await runner.ExecuteNodeForcedAsync(node);
                 EditorUtility.SetDirty(graphAsset);
-                graphView?.RefreshNodeViews();
-                inspectorContainer?.MarkDirtyRepaint();
-                Repaint();
+                RefreshGraphUi(true);
             }
             catch (Exception exception)
             {
@@ -151,9 +161,7 @@ namespace Myrvo.FlowGraph.Editor
             {
                 isExecutingNode = false;
                 EditorApplication.update -= RefreshExecutionUi;
-                graphView?.RefreshNodeViews();
-                inspectorContainer?.MarkDirtyRepaint();
-                Repaint();
+                RefreshGraphUi(true);
             }
         }
 
@@ -164,7 +172,23 @@ namespace Myrvo.FlowGraph.Editor
                 return;
             }
 
-            graphView?.RefreshNodeViews();
+            double now = EditorApplication.timeSinceStartup;
+            if (now < nextExecutionUiRefreshTime)
+            {
+                return;
+            }
+
+            nextExecutionUiRefreshTime = now + ExecutionUiRefreshIntervalSeconds;
+            RefreshGraphUi(false);
+        }
+
+        private void RefreshGraphUi(bool force)
+        {
+            if (graphView == null || !graphView.RefreshNodeViews(force))
+            {
+                return;
+            }
+
             inspectorContainer?.MarkDirtyRepaint();
             Repaint();
         }
@@ -190,14 +214,16 @@ namespace Myrvo.FlowGraph.Editor
                 return;
             }
 
-            SerializedObject serializedObject = new SerializedObject(graphAsset);
-            serializedObject.Update();
+            SerializedObject serializedObject = GetGraphSerializedObject();
+            serializedObject.UpdateIfRequiredOrScript();
 
             EditorGUILayout.LabelField("Details", EditorStyles.boldLabel);
             FlowNodeModel selectedNode = graphView?.SelectedNode;
+            EditorGUI.BeginChangeCheck();
             if (selectedNode == null)
             {
                 DrawGraphInspector(serializedObject);
+                ApplyInspectorChanges(serializedObject, null);
                 return;
             }
 
@@ -211,11 +237,44 @@ namespace Myrvo.FlowGraph.Editor
                 }
 
                 DrawNodeInspector(serializedObject, element, selectedNode);
+                ApplyInspectorChanges(serializedObject, selectedNode);
                 return;
             }
 
             EditorGUILayout.HelpBox("The selected node could not be resolved in the graph asset.", MessageType.Warning);
-            serializedObject.ApplyModifiedProperties();
+            EditorGUI.EndChangeCheck();
+        }
+
+        private SerializedObject GetGraphSerializedObject()
+        {
+            if (graphSerializedObject == null || graphSerializedObject.targetObject != graphAsset)
+            {
+                graphSerializedObject = new SerializedObject(graphAsset);
+            }
+
+            return graphSerializedObject;
+        }
+
+        private void ApplyInspectorChanges(SerializedObject serializedObject, FlowNodeModel selectedNode)
+        {
+            if (!EditorGUI.EndChangeCheck() || !serializedObject.ApplyModifiedProperties())
+            {
+                return;
+            }
+
+            graphAsset.EnsureInitialized();
+            if (selectedNode == null)
+            {
+                graphAsset.MarkAllNodesDirty();
+                graphView.Bind(graphAsset);
+            }
+            else
+            {
+                graphAsset.MarkNodeAndDependentsDirty(selectedNode.Id);
+            }
+
+            EditorUtility.SetDirty(graphAsset);
+            inspectorContainer?.MarkDirtyRepaint();
         }
 
         private void DrawGraphInspector(SerializedObject serializedObject)
@@ -228,18 +287,17 @@ namespace Myrvo.FlowGraph.Editor
 
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.PropertyField(serializedObject.FindProperty("variables"), true);
-            if (serializedObject.ApplyModifiedProperties())
-            {
-                graphAsset.EnsureInitialized();
-                graphAsset.MarkAllNodesDirty();
-                graphView.Bind(graphAsset);
-            }
         }
 
         private void DrawNodeInspector(SerializedObject serializedObject, SerializedProperty nodeProperty, FlowNodeModel selectedNode)
         {
             EditorGUILayout.LabelField("Status", selectedNode.Status.ToString());
             EditorGUILayout.LabelField("Dirty", selectedNode.Dirty ? "Yes" : "No");
+
+            if (selectedNode.Locked)
+            {
+                EditorGUILayout.HelpBox("This node is locked. Its cached outputs are preserved and its settings cannot be changed until it is unlocked from the node header.", MessageType.Info);
+            }
 
             if (!string.IsNullOrWhiteSpace(selectedNode.LastError))
             {
@@ -250,33 +308,28 @@ namespace Myrvo.FlowGraph.Editor
                 EditorGUILayout.HelpBox(selectedNode.LastExecutionSummary, MessageType.None);
             }
 
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Execute Node"))
+            using (new EditorGUI.DisabledScope(selectedNode.Locked))
             {
-                ExecuteSelectedNode();
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button("Execute Node"))
+                {
+                    ExecuteSelectedNode();
+                }
+
+                if (GUILayout.Button("Mark Dirty"))
+                {
+                    Undo.RecordObject(graphAsset, "Mark Flow Node Dirty");
+                    graphAsset.MarkNodeAndDependentsDirty(selectedNode.Id);
+                    EditorUtility.SetDirty(graphAsset);
+                    inspectorContainer?.MarkDirtyRepaint();
+                }
+
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.Space(6f);
+
+                DrawNodeProperties(nodeProperty, selectedNode);
             }
-
-            if (GUILayout.Button("Mark Dirty"))
-            {
-                Undo.RecordObject(graphAsset, "Mark Flow Node Dirty");
-                graphAsset.MarkNodeAndDependentsDirty(selectedNode.Id);
-                EditorUtility.SetDirty(graphAsset);
-                inspectorContainer?.MarkDirtyRepaint();
-            }
-
-            EditorGUILayout.EndHorizontal();
-            EditorGUILayout.Space(6f);
-
-            DrawNodeProperties(nodeProperty, selectedNode);
             DrawOutputSnapshots(selectedNode);
-
-            if (serializedObject.ApplyModifiedProperties())
-            {
-                graphAsset.EnsureInitialized();
-                graphAsset.MarkNodeAndDependentsDirty(selectedNode.Id);
-                EditorUtility.SetDirty(graphAsset);
-                inspectorContainer?.MarkDirtyRepaint();
-            }
         }
 
         private void DrawNodeProperties(SerializedProperty nodeProperty, FlowNodeModel node)
@@ -289,6 +342,10 @@ namespace Myrvo.FlowGraph.Editor
                 case FlowImageUploadNodeModel:
                     DrawObjectProperty(nodeProperty, "image", "Image");
                     DrawTextAreaProperty(nodeProperty, "description", "Description", 3);
+                    break;
+                case FlowCaptureScreenshotNodeModel:
+                    DrawIntSliderProperty(nodeProperty, "superSize", "Resolution Scale", 1, 4);
+                    EditorGUILayout.HelpBox("Captures the Game view's rendered image as a PNG, without Unity editor controls. Keep the Game view visible.", MessageType.None);
                     break;
                 case FlowTextToImageNodeModel:
                     DrawRegistryBackedImageProperties(nodeProperty, node);
@@ -452,7 +509,7 @@ namespace Myrvo.FlowGraph.Editor
 
             if (!string.IsNullOrWhiteSpace(node.LastPreviewData))
             {
-                Texture2D previewTexture = GetPreviewTexture(node.LastPreviewData);
+                Texture2D previewTexture = FlowPreviewTextureCache.Get(node.LastPreviewData);
                 if (previewTexture != null)
                 {
                     float maxWidth = Mathf.Max(120f, position.width * 0.18f);
@@ -484,38 +541,6 @@ namespace Myrvo.FlowGraph.Editor
             }
         }
 
-        private static Texture2D GetPreviewTexture(string previewData)
-        {
-            if (string.IsNullOrWhiteSpace(previewData))
-            {
-                return null;
-            }
-
-            if (PreviewTextureCache.TryGetValue(previewData, out Texture2D cachedTexture) && cachedTexture != null)
-            {
-                return cachedTexture;
-            }
-
-            int commaIndex = previewData.IndexOf(',');
-            if (commaIndex < 0 || commaIndex >= previewData.Length - 1)
-            {
-                return null;
-            }
-
-            try
-            {
-                byte[] imageBytes = Convert.FromBase64String(previewData.Substring(commaIndex + 1));
-                Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                texture.LoadImage(imageBytes);
-                texture.name = "FlowGraphPreview";
-                PreviewTextureCache[previewData] = texture;
-                return texture;
-            }
-            catch
-            {
-                return null;
-            }
-        }
 
         private static void DrawStringProperty(SerializedProperty nodeProperty, string propertyName, string label)
         {
@@ -550,6 +575,15 @@ namespace Myrvo.FlowGraph.Editor
             if (property != null)
             {
                 property.floatValue = EditorGUILayout.Slider(label, property.floatValue, min, max);
+            }
+        }
+
+        private static void DrawIntSliderProperty(SerializedProperty nodeProperty, string propertyName, string label, int min, int max)
+        {
+            SerializedProperty property = nodeProperty.FindPropertyRelative(propertyName);
+            if (property != null)
+            {
+                property.intValue = EditorGUILayout.IntSlider(label, property.intValue, min, max);
             }
         }
 

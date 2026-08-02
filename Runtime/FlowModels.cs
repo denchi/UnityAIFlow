@@ -119,14 +119,13 @@ namespace Myrvo.FlowGraph
             "title",
             "position",
             "dirty",
+            "locked",
             "lastExecutionSummary",
             "inputPorts",
             "outputPorts",
             "status",
             "lastError",
             "lastRunHash",
-            "lastPreviewData",
-            "lastPreviewMimeType",
             "outputSnapshots"
         };
 
@@ -134,12 +133,11 @@ namespace Myrvo.FlowGraph
         [SerializeField] private string title;
         [SerializeField] private Vector2 position;
         [SerializeField] private bool dirty = true;
+        [SerializeField] private bool locked;
         [SerializeField] private string lastExecutionSummary;
         [SerializeField] private FlowNodeExecutionStatus status = FlowNodeExecutionStatus.Dirty;
         [SerializeField] private string lastError;
         [SerializeField] private string lastRunHash;
-        [SerializeField] private string lastPreviewData;
-        [SerializeField] private string lastPreviewMimeType;
         [SerializeField] private List<FlowNodeOutputSnapshot> outputSnapshots = new List<FlowNodeOutputSnapshot>();
         [SerializeField] private List<FlowPortModel> inputPorts = new List<FlowPortModel>();
         [SerializeField] private List<FlowPortModel> outputPorts = new List<FlowPortModel>();
@@ -171,11 +169,32 @@ namespace Myrvo.FlowGraph
             get => dirty;
             set
             {
+                if (locked && value)
+                {
+                    return;
+                }
+
                 dirty = value;
                 if (dirty && status != FlowNodeExecutionStatus.Running)
                 {
                     status = FlowNodeExecutionStatus.Dirty;
                 }
+            }
+        }
+        public bool Locked
+        {
+            get => locked;
+            set
+            {
+                locked = value;
+                if (!locked)
+                {
+                    return;
+                }
+
+                dirty = false;
+                status = FlowNodeExecutionStatus.Success;
+                lastError = string.Empty;
             }
         }
         public string LastExecutionSummary
@@ -186,7 +205,16 @@ namespace Myrvo.FlowGraph
         public FlowNodeExecutionStatus Status
         {
             get => status;
-            set => status = value;
+            set
+            {
+                if (locked && value == FlowNodeExecutionStatus.Dirty)
+                {
+                    dirty = false;
+                    return;
+                }
+
+                status = value;
+            }
         }
         public string LastError
         {
@@ -200,13 +228,12 @@ namespace Myrvo.FlowGraph
         }
         public string LastPreviewData
         {
-            get => lastPreviewData;
-            set => lastPreviewData = value;
+            get => outputSnapshots?.Select(snapshot => snapshot?.GetPreviewData())
+                .FirstOrDefault(previewData => !string.IsNullOrWhiteSpace(previewData)) ?? string.Empty;
         }
         public string LastPreviewMimeType
         {
-            get => lastPreviewMimeType;
-            set => lastPreviewMimeType = value;
+            get => outputSnapshots?.FirstOrDefault(snapshot => !string.IsNullOrWhiteSpace(snapshot?.GetPreviewData()))?.MimeType ?? string.Empty;
         }
         public IReadOnlyList<FlowNodeOutputSnapshot> OutputSnapshots => outputSnapshots;
 
@@ -292,6 +319,12 @@ namespace Myrvo.FlowGraph
             return null;
         }
 
+        /// <summary>
+        /// Determines whether unchanged inputs may reuse this node's cached outputs.
+        /// Nodes that read changing external state, such as the current screen, should override this to false.
+        /// </summary>
+        public virtual bool CanReuseCachedOutputs => true;
+
         public virtual FlowModelCapability GetPrimaryCapability()
         {
             return FlowModelCapability.None;
@@ -310,8 +343,6 @@ namespace Myrvo.FlowGraph
         public virtual void CaptureOutputsForPersistence(IReadOnlyDictionary<string, object> outputs)
         {
             outputSnapshots.Clear();
-            LastPreviewData = string.Empty;
-            LastPreviewMimeType = string.Empty;
 
             if (outputs == null)
             {
@@ -322,12 +353,23 @@ namespace Myrvo.FlowGraph
             {
                 FlowNodeOutputSnapshot snapshot = FlowNodeOutputSnapshot.Create(pair.Key, pair.Value);
                 outputSnapshots.Add(snapshot);
-                if (string.IsNullOrWhiteSpace(LastPreviewData) && !string.IsNullOrWhiteSpace(snapshot.PreviewData))
-                {
-                    LastPreviewData = snapshot.PreviewData;
-                    LastPreviewMimeType = snapshot.MimeType;
-                }
             }
+        }
+
+        internal bool OptimizePersistedPreviewData()
+        {
+            if (outputSnapshots == null)
+            {
+                return false;
+            }
+
+            bool changed = false;
+            foreach (FlowNodeOutputSnapshot snapshot in outputSnapshots)
+            {
+                changed |= snapshot?.RemoveRedundantPreviewData() ?? false;
+            }
+
+            return changed;
         }
 
         public virtual string BuildCacheSignature()

@@ -8,16 +8,19 @@ namespace Myrvo.FlowGraph.Editor
     {
         public override void OnInspectorGUI()
         {
-            DrawDefaultInspector();
+            FlowGraphAsset graphAsset = (FlowGraphAsset)target;
+            EditorGUILayout.LabelField("Nodes", graphAsset.Nodes.Count.ToString());
+            EditorGUILayout.LabelField("Connections", graphAsset.Edges.Count.ToString());
+            EditorGUILayout.LabelField("Variables", graphAsset.Variables.Count.ToString());
+            EditorGUILayout.HelpBox("Edit nodes, connections, and graph variables in the Flow Graph window. The full serialized graph is intentionally not drawn here to keep large image graphs responsive.", MessageType.Info);
 
             if (GUILayout.Button("Open Flow Graph"))
             {
-                FlowGraphEditorWindow.Open((FlowGraphAsset)target);
+                FlowGraphEditorWindow.Open(graphAsset);
             }
 
             if (GUILayout.Button("Mark All Nodes Dirty"))
             {
-                FlowGraphAsset graphAsset = (FlowGraphAsset)target;
                 Undo.RecordObject(graphAsset, "Mark Flow Graph Dirty");
                 graphAsset.MarkAllNodesDirty();
                 EditorUtility.SetDirty(graphAsset);

@@ -35,6 +35,37 @@ namespace Myrvo.FlowGraph
         public string PreviewData => previewData;
         public string MimeType => mimeType;
 
+        /// <summary>
+        /// Gets the best displayable preview without duplicating image data in the snapshot.
+        /// Image snapshots use their persisted DataUri as the preview when no distinct preview exists.
+        /// </summary>
+        public string GetPreviewData()
+        {
+            if (!string.IsNullOrWhiteSpace(previewData))
+            {
+                return previewData;
+            }
+
+            return !string.IsNullOrWhiteSpace(mimeType) && mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                ? stringValue
+                : string.Empty;
+        }
+
+        public bool RemoveRedundantPreviewData()
+        {
+            if (string.IsNullOrWhiteSpace(previewData) ||
+                string.IsNullOrWhiteSpace(stringValue) ||
+                string.IsNullOrWhiteSpace(mimeType) ||
+                !mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(previewData, stringValue, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            previewData = string.Empty;
+            return true;
+        }
+
         public object ToRuntimeValue()
         {
             return valueType switch
@@ -93,9 +124,11 @@ namespace Myrvo.FlowGraph
                     return snapshot;
                 case FlowImageArtifact imageArtifact:
                     snapshot.valueType = FlowValueType.Object;
-                    snapshot.stringValue = imageArtifact.DataUri;
+                    snapshot.stringValue = imageArtifact.GetPreviewDataUri();
                     snapshot.summary = imageArtifact.Label;
-                    snapshot.previewData = imageArtifact.GetPreviewDataUri();
+                    // The image DataUri is the canonical persisted payload and also the preview.
+                    // Keeping it in previewData triples large image payloads in graph YAML.
+                    snapshot.previewData = string.Empty;
                     snapshot.mimeType = imageArtifact.MimeType;
                     return snapshot;
                 case FlowVideoArtifact videoArtifact:

@@ -17,12 +17,18 @@ namespace Myrvo.FlowGraph.Editor
         private readonly MiniMap miniMap;
         private Blackboard blackboard;
         private FlowGraphAsset graphAsset;
+        private bool isSpacePanning;
+        private bool isPointerPanning;
+        private Vector2 panPointerPosition;
 
         public FlowGraphView(FlowGraphEditorWindow ownerWindow)
         {
             this.ownerWindow = ownerWindow;
             style.flexGrow = 1f;
             focusable = true;
+            // This disables GraphView's built-in keyboard shortcut set, including
+            // Space-to-create-node. Canvas panning is handled below instead.
+            isReframable = false;
             Insert(0, new GridBackground());
 
             SetupZoom(ContentZoomer.DefaultMinScale, ContentZoomer.DefaultMaxScale);
@@ -31,6 +37,14 @@ namespace Myrvo.FlowGraph.Editor
             this.AddManipulator(new RectangleSelector());
             this.AddManipulator(new ClickSelector());
 
+            // Space is reserved for the familiar canvas-pan gesture. GraphView
+            // otherwise uses it as a node-creation shortcut.
+            RegisterCallback<KeyDownEvent>(OnKeyDown, TrickleDown.TrickleDown);
+            RegisterCallback<KeyUpEvent>(OnKeyUp, TrickleDown.TrickleDown);
+            RegisterCallback<PointerDownEvent>(OnPointerDown, TrickleDown.TrickleDown);
+            RegisterCallback<PointerMoveEvent>(OnPointerMove, TrickleDown.TrickleDown);
+            RegisterCallback<PointerUpEvent>(OnPointerUp, TrickleDown.TrickleDown);
+
             miniMap = new MiniMap { anchored = true };
             miniMap.SetPosition(new Rect(0f, 0f, 180f, 110f));
             Add(miniMap);
@@ -38,13 +52,101 @@ namespace Myrvo.FlowGraph.Editor
 
             searchWindow = ScriptableObject.CreateInstance<FlowNodeSearchWindow>();
             searchWindow.Initialize(this);
-            nodeCreationRequest = context => SearchWindow.Open(new SearchWindowContext(context.screenMousePosition), searchWindow);
+            nodeCreationRequest = context =>
+            {
+                searchWindow.ClearConnection();
+                SearchWindow.Open(new SearchWindowContext(context.screenMousePosition), searchWindow);
+            };
             graphViewChanged += OnGraphViewChanged;
             viewTransformChanged += OnViewTransformChanged;
             SetupBlackboard();
         }
 
+        private void OnKeyDown(KeyDownEvent evt)
+        {
+            if (evt.keyCode != KeyCode.Space)
+            {
+                return;
+            }
+
+            isSpacePanning = true;
+            evt.StopImmediatePropagation();
+        }
+
+        private void OnKeyUp(KeyUpEvent evt)
+        {
+            if (evt.keyCode != KeyCode.Space)
+            {
+                return;
+            }
+
+            isSpacePanning = false;
+            EndSpacePan();
+            evt.StopImmediatePropagation();
+        }
+
+        private void OnPointerDown(PointerDownEvent evt)
+        {
+            if (!isSpacePanning || evt.button != 0)
+            {
+                return;
+            }
+
+            isPointerPanning = true;
+            panPointerPosition = new Vector2(evt.position.x, evt.position.y);
+            evt.StopImmediatePropagation();
+        }
+
+        private void OnPointerMove(PointerMoveEvent evt)
+        {
+            if (!isPointerPanning)
+            {
+                return;
+            }
+
+            Vector2 pointerPosition = new Vector2(evt.position.x, evt.position.y);
+            Vector2 delta = pointerPosition - panPointerPosition;
+            panPointerPosition = pointerPosition;
+            UpdateViewTransform(viewTransform.position + new Vector3(delta.x, delta.y, 0f), viewTransform.scale);
+            evt.StopImmediatePropagation();
+        }
+
+        private void OnPointerUp(PointerUpEvent evt)
+        {
+            if (!isPointerPanning)
+            {
+                return;
+            }
+
+            EndSpacePan();
+            evt.StopImmediatePropagation();
+        }
+
+        private void EndSpacePan()
+        {
+            isPointerPanning = false;
+        }
+
         public FlowNodeModel SelectedNode { get; private set; }
+
+        internal void ExecuteNode(FlowNodeModel node)
+        {
+            ownerWindow.ExecuteNode(node);
+        }
+
+        internal void ToggleNodeLock(FlowNodeModel node)
+        {
+            if (graphAsset == null || node == null)
+            {
+                return;
+            }
+
+            Undo.RecordObject(graphAsset, node.Locked ? "Unlock Flow Node" : "Lock Flow Node");
+            node.Locked = !node.Locked;
+            EditorUtility.SetDirty(graphAsset);
+            RefreshNodeViews(true);
+            ownerWindow.NotifySelectionChanged();
+        }
 
         public override List<Port> GetCompatiblePorts(Port startPort, NodeAdapter nodeAdapter)
         {
@@ -58,11 +160,7 @@ namespace Myrvo.FlowGraph.Editor
 
                 FlowPortModel startPortModel = ((FlowPortView)startPort).PortModel;
                 FlowPortModel candidatePortModel = ((FlowPortView)port).PortModel;
-                bool typesCompatible = startPortModel.ValueType == candidatePortModel.ValueType ||
-                                       startPortModel.ValueType == FlowValueType.Object ||
-                                       candidatePortModel.ValueType == FlowValueType.Object;
-
-                if (typesCompatible)
+                if (ArePortTypesCompatible(startPortModel, candidatePortModel))
                 {
                     compatiblePorts.Add(port);
                 }
@@ -108,10 +206,18 @@ namespace Myrvo.FlowGraph.Editor
 
         public void RefreshNodeViews()
         {
+            RefreshNodeViews(false);
+        }
+
+        public bool RefreshNodeViews(bool force)
+        {
+            bool changed = false;
             foreach ((_, FlowNodeView nodeView) in nodeViewsById)
             {
-                nodeView.RefreshFromModel();
+                changed |= nodeView.RefreshFromModel(force);
             }
+
+            return changed;
         }
 
         public void CreateNode(Type nodeType, Vector2 screenPosition)
@@ -121,15 +227,106 @@ namespace Myrvo.FlowGraph.Editor
                 return;
             }
 
-            Vector2 localPosition = contentViewContainer.WorldToLocal(screenPosition - ownerWindow.position.position);
             Undo.RecordObject(graphAsset, "Create Flow Node");
+            CreateNodeView(nodeType, screenPosition);
+            ownerWindow.NotifySelectionChanged();
+        }
+
+        internal void OpenNodePickerForPort(FlowPortView port, Vector2 graphPosition)
+        {
+            if (port == null)
+            {
+                return;
+            }
+
+            searchWindow.BeginConnection(port);
+            Vector2 screenPosition = ownerWindow.position.position + graphPosition;
+            SearchWindow.Open(new SearchWindowContext(screenPosition), searchWindow);
+        }
+
+        internal void CreateNodeAndConnect(Type nodeType, Vector2 screenPosition, FlowPortView existingPort)
+        {
+            if (graphAsset == null || existingPort == null || existingPort.NodeView.NodeModel.Locked)
+            {
+                return;
+            }
+
+            Undo.RecordObject(graphAsset, "Create and Connect Flow Node");
+            FlowNodeView nodeView = CreateNodeView(nodeType, screenPosition);
+            FlowPortView createdPort = FindFirstCompatiblePort(nodeView, existingPort);
+            if (createdPort == null)
+            {
+                return;
+            }
+
+            FlowPortView output = existingPort.direction == Direction.Output ? existingPort : createdPort;
+            FlowPortView input = existingPort.direction == Direction.Input ? existingPort : createdPort;
+            RemoveSingleInputConnection(input);
+            FlowEdgeModel edgeModel = graphAsset.AddEdge(
+                output.NodeView.NodeModel.Id,
+                output.PortModel.Id,
+                input.NodeView.NodeModel.Id,
+                input.PortModel.Id);
+            graphAsset.MarkAllNodesDirty();
+            EditorUtility.SetDirty(graphAsset);
+            CreateEdgeView(edgeModel);
+            ownerWindow.NotifySelectionChanged();
+        }
+
+        internal static bool ArePortTypesCompatible(FlowPortModel first, FlowPortModel second)
+        {
+            return first.ValueType == second.ValueType;
+        }
+
+        private FlowNodeView CreateNodeView(Type nodeType, Vector2 screenPosition)
+        {
+            if (graphAsset == null)
+            {
+                return null;
+            }
+
+            Vector2 localPosition = contentViewContainer.WorldToLocal(screenPosition - ownerWindow.position.position);
             FlowNodeModel node = graphAsset.CreateNode(nodeType, localPosition);
             EditorUtility.SetDirty(graphAsset);
-
             FlowNodeView nodeView = new FlowNodeView(node, this);
             nodeViewsById[node.Id] = nodeView;
             AddElement(nodeView);
-            ownerWindow.NotifySelectionChanged();
+            return nodeView;
+        }
+
+        private static FlowPortView FindFirstCompatiblePort(FlowNodeView nodeView, FlowPortView existingPort)
+        {
+            IEnumerable<FlowPortModel> candidateModels = existingPort.direction == Direction.Output
+                ? nodeView.NodeModel.InputPorts
+                : nodeView.NodeModel.OutputPorts;
+            FlowPortDirection direction = existingPort.direction == Direction.Output ? FlowPortDirection.Input : FlowPortDirection.Output;
+            foreach (FlowPortModel candidateModel in candidateModels)
+            {
+                if (ArePortTypesCompatible(existingPort.PortModel, candidateModel))
+                {
+                    return nodeView.GetPort(candidateModel.Id, direction);
+                }
+            }
+
+            return null;
+        }
+
+        private void RemoveSingleInputConnection(FlowPortView input)
+        {
+            if (input.PortModel.AllowsMultipleConnections)
+            {
+                return;
+            }
+
+            foreach (Edge connection in input.connections.ToList())
+            {
+                if (connection.userData is string edgeId)
+                {
+                    graphAsset.RemoveEdge(edgeId);
+                }
+
+                RemoveElement(connection);
+            }
         }
 
         internal void SelectNode(FlowNodeModel node)
@@ -145,7 +342,7 @@ namespace Myrvo.FlowGraph.Editor
 
         internal void SyncNodePosition(FlowNodeModel node, Rect rect)
         {
-            if (graphAsset == null)
+            if (graphAsset == null || node.Locked)
             {
                 return;
             }
@@ -164,6 +361,16 @@ namespace Myrvo.FlowGraph.Editor
 
             if (graphViewChange.edgesToCreate != null)
             {
+                graphViewChange.edgesToCreate = graphViewChange.edgesToCreate
+                    .Where(edge => !((FlowPortView)edge.output).NodeView.NodeModel.Locked &&
+                                   !((FlowPortView)edge.input).NodeView.NodeModel.Locked)
+                    .ToList();
+
+                if (graphViewChange.edgesToCreate.Count == 0)
+                {
+                    return graphViewChange;
+                }
+
                 Undo.RecordObject(graphAsset, "Connect Flow Nodes");
                 foreach (Edge edge in graphViewChange.edgesToCreate)
                 {
@@ -179,6 +386,15 @@ namespace Myrvo.FlowGraph.Editor
 
             if (graphViewChange.elementsToRemove != null)
             {
+                graphViewChange.elementsToRemove = graphViewChange.elementsToRemove
+                    .Where(graphElement => !IsLockedGraphElement(graphElement))
+                    .ToList();
+
+                if (graphViewChange.elementsToRemove.Count == 0)
+                {
+                    return graphViewChange;
+                }
+
                 Undo.RecordObject(graphAsset, "Remove Flow Graph Elements");
                 foreach (GraphElement graphElement in graphViewChange.elementsToRemove)
                 {
@@ -209,6 +425,16 @@ namespace Myrvo.FlowGraph.Editor
             }
 
             return graphViewChange;
+        }
+
+        private static bool IsLockedGraphElement(GraphElement graphElement)
+        {
+            return graphElement switch
+            {
+                FlowNodeView nodeView => nodeView.NodeModel.Locked,
+                Edge edge => ((FlowPortView)edge.output).NodeView.NodeModel.Locked || ((FlowPortView)edge.input).NodeView.NodeModel.Locked,
+                _ => false
+            };
         }
 
         private void CreateEdgeView(FlowEdgeModel edgeModel)
@@ -354,6 +580,19 @@ namespace Myrvo.FlowGraph.Editor
 
             public void OnDropOutsidePort(Edge edge, Vector2 position)
             {
+                Port draggedPort = edge.output ?? edge.input;
+                if (!(draggedPort is FlowPortView port))
+                {
+                    return;
+                }
+
+                FlowGraphView flowGraphView = graphView as FlowGraphView;
+                if (flowGraphView == null)
+                {
+                    return;
+                }
+
+                flowGraphView.OpenNodePickerForPort(port, position);
             }
 
             public void OnDrop(GraphView _, Edge edge)
@@ -438,6 +677,16 @@ namespace Myrvo.FlowGraph.Editor
         private readonly Image previewImage;
         private readonly VisualElement statusIndicator;
         private readonly VisualElement headerControlsContainer;
+        private readonly Button expandButton;
+        private readonly Button executeButton;
+        private readonly Button lockButton;
+        private Texture2D previewTexture;
+        private string displayedTitle;
+        private string displayedTooltip;
+        private string displayedPreviewData;
+        private FlowNodeExecutionStatus displayedStatus;
+        private bool displayedLocked;
+        private bool hasDisplayedState;
         private const float PreviewHorizontalPadding = 8f;
         private const float PreviewMinHeight = 90f;
         private const float PreviewMaxHeight = 180f;
@@ -503,24 +752,33 @@ namespace Myrvo.FlowGraph.Editor
                     borderTopRightRadius = 5f,
                     borderBottomLeftRadius = 5f,
                     borderBottomRightRadius = 5f,
-                    marginLeft = 6f,
-                    marginRight = 10f,
+                    marginLeft = 10f,
+                    marginRight = 6f,
                     marginTop = 0f,
                     marginBottom = 0f,
                     alignSelf = Align.Center
                 }
             };
 
+            // The built-in GraphView expander is styled as a direct child of the
+            // title container. Moving it into our custom header made its icon
+            // invisible, and GraphView only creates it for expandable nodes.
+            // Use an explicit toggle so every flow node has the same control.
             if (titleButtonContainer != null)
             {
-                titleButtonContainer.style.marginLeft = 0f;
-                titleButtonContainer.style.marginRight = 2f;
-                titleButtonContainer.style.alignSelf = Align.Center;
-                titleContainer.Remove(titleButtonContainer);
-                headerControlsContainer.Add(titleButtonContainer);
+                titleButtonContainer.style.display = DisplayStyle.None;
             }
 
-            headerControlsContainer.Add(statusIndicator);
+            expandButton = CreateHeaderButton(string.Empty, "Collapse node", ToggleExpanded);
+            executeButton = CreateHeaderButton(string.Empty, "Execute this node", ExecuteNode);
+            lockButton = CreateHeaderButton(string.Empty, "Lock node outputs", ToggleLock);
+            expandButton.AddToClassList("myrvo-flow-node-icon");
+            executeButton.AddToClassList("myrvo-flow-node-icon");
+            lockButton.AddToClassList("myrvo-flow-node-icon");
+            headerControlsContainer.Add(expandButton);
+            headerControlsContainer.Add(executeButton);
+            headerControlsContainer.Add(lockButton);
+            titleContainer.Insert(0, statusIndicator);
             titleContainer.Add(headerControlsContainer);
 
             previewImage = new Image
@@ -546,8 +804,11 @@ namespace Myrvo.FlowGraph.Editor
 
             RegisterCallback<MouseDownEvent>(OnMouseDown);
             RefreshExpandedState();
+            RefreshExpandButton();
+            RefreshExecuteButton();
+            RefreshLockButton();
             RefreshPorts();
-            RefreshFromModel();
+            RefreshFromModel(true);
         }
 
         public FlowNodeModel NodeModel { get; }
@@ -572,40 +833,86 @@ namespace Myrvo.FlowGraph.Editor
             }
         }
 
-        public void RefreshFromModel()
+        public bool RefreshFromModel(bool force = false)
         {
-            title = NodeModel.Title;
-            statusIndicator.style.backgroundColor = GetStatusColor(NodeModel);
-            statusIndicator.tooltip = NodeModel.Status switch
+            string nextTitle = NodeModel.Title;
+            FlowNodeExecutionStatus nextStatus = NodeModel.Status;
+            bool nextLocked = NodeModel.Locked;
+            string nextTooltip = GetStatusTooltip(NodeModel);
+            string nextPreviewData = NodeModel.LastPreviewData;
+            bool previewChanged = !hasDisplayedState && !string.IsNullOrWhiteSpace(nextPreviewData) ||
+                                  (hasDisplayedState && !ReferenceEquals(displayedPreviewData, nextPreviewData));
+            bool chromeChanged = force || !hasDisplayedState ||
+                                 !string.Equals(displayedTitle, nextTitle, StringComparison.Ordinal) ||
+                                 displayedStatus != nextStatus ||
+                                 displayedLocked != nextLocked ||
+                                 !string.Equals(displayedTooltip, nextTooltip, StringComparison.Ordinal);
+            if (!previewChanged && !chromeChanged)
             {
-                FlowNodeExecutionStatus.Error when !string.IsNullOrWhiteSpace(NodeModel.LastError) => $"Error: {NodeModel.LastError}",
-                FlowNodeExecutionStatus.Dirty => "Dirty",
-                FlowNodeExecutionStatus.Running => "Running",
-                FlowNodeExecutionStatus.Success when !string.IsNullOrWhiteSpace(NodeModel.LastExecutionSummary) => NodeModel.LastExecutionSummary,
-                _ => NodeModel.Status.ToString()
-            };
-
-            Texture2D previewTexture = DecodePreviewTexture(NodeModel.LastPreviewData);
-            previewImage.image = previewTexture;
-            if (previewTexture != null)
-            {
-                float aspectRatio = previewTexture.height > 0 ? (float)previewTexture.width / previewTexture.height : 1f;
-                float targetWidth = FlowGraphView.NodeWidth - (PreviewHorizontalPadding * 2f);
-                bool useLetterbox = aspectRatio >= LetterboxAspectThreshold;
-                float targetHeight = useLetterbox
-                    ? LetterboxHeight
-                    : Mathf.Clamp(targetWidth / Mathf.Max(0.01f, aspectRatio), PreviewMinHeight, PreviewMaxHeight);
-
-                previewImage.scaleMode = useLetterbox ? ScaleMode.ScaleToFit : ScaleMode.ScaleAndCrop;
-                previewImage.style.height = targetHeight;
-                previewImage.style.display = DisplayStyle.Flex;
+                return false;
             }
-            else
+
+            if (chromeChanged)
+            {
+                title = nextTitle;
+                statusIndicator.style.backgroundColor = GetStatusColor(nextStatus);
+                statusIndicator.tooltip = nextTooltip;
+                RefreshExecuteButton();
+                RefreshLockButton();
+            }
+
+            if (previewChanged)
+            {
+                previewTexture = FlowPreviewTextureCache.Get(nextPreviewData, "FlowGraphNodePreview");
+                previewImage.image = previewTexture;
+                ApplyPreviewLayout(previewTexture);
+            }
+
+            displayedTitle = nextTitle;
+            displayedStatus = nextStatus;
+            displayedLocked = nextLocked;
+            displayedTooltip = nextTooltip;
+            displayedPreviewData = nextPreviewData;
+            hasDisplayedState = true;
+            if (previewChanged)
+            {
+                RefreshExpandedState();
+                RefreshExpandButton();
+            }
+
+            return true;
+        }
+
+        private void ApplyPreviewLayout(Texture2D texture)
+        {
+            if (texture == null)
             {
                 previewImage.style.display = DisplayStyle.None;
+                return;
             }
 
-            RefreshExpandedState();
+            float aspectRatio = texture.height > 0 ? (float)texture.width / texture.height : 1f;
+            float targetWidth = FlowGraphView.NodeWidth - (PreviewHorizontalPadding * 2f);
+            bool useLetterbox = aspectRatio >= LetterboxAspectThreshold;
+            float targetHeight = useLetterbox
+                ? LetterboxHeight
+                : Mathf.Clamp(targetWidth / Mathf.Max(0.01f, aspectRatio), PreviewMinHeight, PreviewMaxHeight);
+
+            previewImage.scaleMode = useLetterbox ? ScaleMode.ScaleToFit : ScaleMode.ScaleAndCrop;
+            previewImage.style.height = targetHeight;
+            previewImage.style.display = DisplayStyle.Flex;
+        }
+
+        private static string GetStatusTooltip(FlowNodeModel nodeModel)
+        {
+            return nodeModel.Status switch
+            {
+                FlowNodeExecutionStatus.Error when !string.IsNullOrWhiteSpace(nodeModel.LastError) => $"Error: {nodeModel.LastError}",
+                FlowNodeExecutionStatus.Dirty => "Dirty",
+                FlowNodeExecutionStatus.Running => "Running",
+                FlowNodeExecutionStatus.Success when !string.IsNullOrWhiteSpace(nodeModel.LastExecutionSummary) => nodeModel.LastExecutionSummary,
+                _ => nodeModel.Status.ToString()
+            };
         }
 
         private void OnMouseDown(MouseDownEvent evt)
@@ -620,6 +927,75 @@ namespace Myrvo.FlowGraph.Editor
             evt.StopPropagation();
         }
 
+        private Button CreateHeaderButton(string text, string tooltip, Action onClick)
+        {
+            Button button = new Button(onClick)
+            {
+                text = text,
+                tooltip = tooltip,
+                focusable = false
+            };
+            // Keep these as icon controls, not default Unity buttons.
+            button.style.backgroundColor = Color.clear;
+            button.style.color = new Color(0.92f, 0.92f, 0.92f, 1f);
+            button.style.fontSize = 12f;
+            button.style.unityFontStyleAndWeight = FontStyle.Bold;
+            button.style.unityTextAlign = TextAnchor.MiddleCenter;
+            return button;
+        }
+
+        private void ToggleExpanded()
+        {
+            expanded = !expanded;
+            RefreshExpandedState();
+            RefreshExpandButton();
+        }
+
+        private void RefreshExpandButton()
+        {
+            expandButton.EnableInClassList("myrvo-flow-node-chevron--expanded", expanded);
+            expandButton.EnableInClassList("myrvo-flow-node-chevron--collapsed", !expanded);
+            expandButton.tooltip = expanded ? "Collapse node" : "Expand node";
+        }
+
+        private void ExecuteNode()
+        {
+            graphView.SelectNode(NodeModel);
+            graphView.ExecuteNode(NodeModel);
+        }
+
+        private void RefreshExecuteButton()
+        {
+            bool isRunning = NodeModel.Status == FlowNodeExecutionStatus.Running;
+            executeButton.EnableInClassList("myrvo-flow-node-play", !isRunning);
+            executeButton.EnableInClassList("myrvo-flow-node-stop", isRunning);
+            executeButton.tooltip = isRunning
+                ? "Execution in progress (cancellation is not available)"
+                : "Execute this node";
+        }
+
+        private void ToggleLock()
+        {
+            graphView.ToggleNodeLock(NodeModel);
+        }
+
+        private void RefreshLockButton()
+        {
+            lockButton.EnableInClassList("myrvo-flow-node-lock--locked", NodeModel.Locked);
+            lockButton.EnableInClassList("myrvo-flow-node-lock--unlocked", !NodeModel.Locked);
+            lockButton.tooltip = NodeModel.Locked ? "Unlock node outputs" : "Lock node outputs";
+            if (NodeModel.Locked)
+            {
+                capabilities &= ~Capabilities.Movable;
+                capabilities &= ~Capabilities.Deletable;
+            }
+            else
+            {
+                capabilities |= Capabilities.Movable;
+                capabilities |= Capabilities.Deletable;
+            }
+        }
+
         private FlowPortView CreatePort(FlowPortModel portModel, Direction direction)
         {
             Port.Capacity capacity = portModel.AllowsMultipleConnections ? Port.Capacity.Multi : Port.Capacity.Single;
@@ -631,36 +1007,9 @@ namespace Myrvo.FlowGraph.Editor
             return $"{direction}:{portId}";
         }
 
-        private static Texture2D DecodePreviewTexture(string previewData)
+        private static Color GetStatusColor(FlowNodeExecutionStatus status)
         {
-            if (string.IsNullOrWhiteSpace(previewData))
-            {
-                return null;
-            }
-
-            int commaIndex = previewData.IndexOf(',');
-            if (commaIndex < 0 || commaIndex >= previewData.Length - 1)
-            {
-                return null;
-            }
-
-            try
-            {
-                byte[] imageBytes = Convert.FromBase64String(previewData.Substring(commaIndex + 1));
-                Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                texture.LoadImage(imageBytes);
-                texture.name = "FlowGraphNodePreview";
-                return texture;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static Color GetStatusColor(FlowNodeModel nodeModel)
-        {
-            return nodeModel.Status switch
+            return status switch
             {
                 FlowNodeExecutionStatus.Success => new Color(0.34f, 0.78f, 0.36f, 1f),
                 FlowNodeExecutionStatus.Error => new Color(0.89f, 0.28f, 0.26f, 1f),

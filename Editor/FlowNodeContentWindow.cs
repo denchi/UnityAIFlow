@@ -8,8 +8,6 @@ namespace Myrvo.FlowGraph.Editor
 {
     public sealed class FlowNodeContentWindow : EditorWindow
     {
-        private static readonly Dictionary<string, Texture2D> PreviewTextureCache = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
-
         private FlowNodeModel node;
         private FlowGraphAsset graphAsset;
         private FlowCropNodeModel cropNode;
@@ -79,7 +77,7 @@ namespace Myrvo.FlowGraph.Editor
             Texture2D activeTexture = cropNode != null ? cropSourceTexture : texture;
             if (activeTexture != null)
             {
-                if (cropNode != null)
+                if (cropNode != null && !node.Locked)
                 {
                     HandleCropEvents(contentRect, activeTexture);
                 }
@@ -111,9 +109,9 @@ namespace Myrvo.FlowGraph.Editor
                 GUILayout.Label(node.Title, EditorStyles.boldLabel);
                 GUILayout.FlexibleSpace();
 
-                if (cropNode != null && cropSourceTexture != null)
+                using (new EditorGUI.DisabledScope(node.Locked))
                 {
-                    if (GUILayout.Button("Reset Crop", EditorStyles.toolbarButton, GUILayout.Width(78f)))
+                    if (cropNode != null && cropSourceTexture != null && GUILayout.Button("Reset Crop", EditorStyles.toolbarButton, GUILayout.Width(78f)))
                     {
                         ApplyCropRect(new RectInt(0, 0, cropSourceTexture.width, cropSourceTexture.height));
                         Repaint();
@@ -490,16 +488,17 @@ namespace Myrvo.FlowGraph.Editor
 
             if (!string.IsNullOrWhiteSpace(node?.LastPreviewData))
             {
-                return DecodePreviewTexture(node.LastPreviewData);
+                return FlowPreviewTextureCache.Get(node.LastPreviewData, "FlowGraphContentPreview");
             }
 
             if (node?.OutputSnapshots != null)
             {
                 foreach (FlowNodeOutputSnapshot snapshot in node.OutputSnapshots)
                 {
-                    if (!string.IsNullOrWhiteSpace(snapshot.PreviewData))
+                    string previewData = snapshot.GetPreviewData();
+                    if (!string.IsNullOrWhiteSpace(previewData))
                     {
-                        Texture2D previewTexture = DecodePreviewTexture(snapshot.PreviewData);
+                        Texture2D previewTexture = FlowPreviewTextureCache.Get(previewData, "FlowGraphContentPreview");
                         if (previewTexture != null)
                         {
                             return previewTexture;
@@ -550,37 +549,5 @@ namespace Myrvo.FlowGraph.Editor
             return node.LastExecutionSummary;
         }
 
-        private static Texture2D DecodePreviewTexture(string previewData)
-        {
-            if (string.IsNullOrWhiteSpace(previewData))
-            {
-                return null;
-            }
-
-            if (PreviewTextureCache.TryGetValue(previewData, out Texture2D cachedTexture) && cachedTexture != null)
-            {
-                return cachedTexture;
-            }
-
-            int commaIndex = previewData.IndexOf(',');
-            if (commaIndex < 0 || commaIndex >= previewData.Length - 1)
-            {
-                return null;
-            }
-
-            try
-            {
-                byte[] imageBytes = Convert.FromBase64String(previewData.Substring(commaIndex + 1));
-                Texture2D previewTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                previewTexture.LoadImage(imageBytes);
-                previewTexture.name = "FlowGraphContentPreview";
-                PreviewTextureCache[previewData] = previewTexture;
-                return previewTexture;
-            }
-            catch
-            {
-                return null;
-            }
-        }
     }
 }

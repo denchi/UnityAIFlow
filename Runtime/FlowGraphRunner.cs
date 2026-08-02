@@ -288,6 +288,20 @@ namespace Myrvo.FlowGraph
 
         public async Task<FlowNodeExecutionResult> ExecuteNodeAsync(FlowNodeModel targetNode)
         {
+            return await ExecuteNodeAsync(targetNode, false);
+        }
+
+        /// <summary>
+        /// Executes the requested node even when its cached outputs are valid.
+        /// Dependencies still use normal cache rules, and locked nodes always skip.
+        /// </summary>
+        public async Task<FlowNodeExecutionResult> ExecuteNodeForcedAsync(FlowNodeModel targetNode)
+        {
+            return await ExecuteNodeAsync(targetNode, true);
+        }
+
+        private async Task<FlowNodeExecutionResult> ExecuteNodeAsync(FlowNodeModel targetNode, bool forceTargetNode)
+        {
             FlowGraphValidationResult validation = Validate();
             if (!validation.IsValid)
             {
@@ -305,7 +319,7 @@ namespace Myrvo.FlowGraph
             foreach (string nodeId in orderedNodeIds)
             {
                 FlowNodeModel node = nodesById[nodeId];
-                executedAny |= await ExecuteNodeIfNeededAsync(node, context, false);
+                executedAny |= await ExecuteNodeIfNeededAsync(node, context, forceTargetNode && ReferenceEquals(node, targetNode));
             }
 
             executionState.CaptureVariables(context);
@@ -378,12 +392,20 @@ namespace Myrvo.FlowGraph
 
         private async Task<bool> ExecuteNodeIfNeededAsync(FlowNodeModel node, FlowExecutionContext context, bool forceExecute)
         {
+            if (node.Locked)
+            {
+                RestoreOutputsFromSnapshots(node, context);
+                node.Dirty = false;
+                node.Status = FlowNodeExecutionStatus.Success;
+                return false;
+            }
+
             string inputHash = ComputeInputHash(node, context);
             bool inputChanged = !string.Equals(node.LastRunHash, inputHash, StringComparison.Ordinal);
             bool hasCachedExecutionOutputs = executionState.HasCachedOutputs(node.Id);
             bool hasPersistedSnapshots = node.OutputSnapshots.Count > 0;
-            bool hasAvailableOutputs = hasCachedExecutionOutputs || hasPersistedSnapshots;
-            bool shouldExecute = forceExecute || node.Dirty || node.Status == FlowNodeExecutionStatus.Error || inputChanged || !hasAvailableOutputs;
+            bool hasAvailableOutputs = HasUsableCachedOutputs(node, context);
+            bool shouldExecute = forceExecute || !node.CanReuseCachedOutputs || node.Dirty || node.Status == FlowNodeExecutionStatus.Error || inputChanged || !hasAvailableOutputs;
             if (!shouldExecute)
             {
                 RestoreOutputsFromSnapshots(node, context);
@@ -407,6 +429,48 @@ namespace Myrvo.FlowGraph
             foreach (FlowNodeOutputSnapshot snapshot in node.OutputSnapshots)
             {
                 context.SetNodeOutput(node.Id, snapshot.Key, snapshot.ToRuntimeValue());
+            }
+        }
+
+        private static bool HasUsableCachedOutputs(FlowNodeModel node, FlowExecutionContext context)
+        {
+            if (node.OutputPorts.Count == 0)
+            {
+                return true;
+            }
+
+            foreach (FlowPortModel outputPort in node.OutputPorts)
+            {
+                if (context.TryGetNodeOutput(node.Id, outputPort.Key, out object runtimeValue) && IsUsableOutputValue(runtimeValue))
+                {
+                    continue;
+                }
+
+                FlowNodeOutputSnapshot snapshot = node.OutputSnapshots.FirstOrDefault(candidate => candidate.Key == outputPort.Key);
+                if (!IsUsableOutputValue(snapshot?.ToRuntimeValue()))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IsUsableOutputValue(object value)
+        {
+            if (value is not FlowImageArtifact imageArtifact)
+            {
+                return value != null;
+            }
+
+            try
+            {
+                byte[] bytes = FlowProviderExecutionHelpers.DecodeDataUri(imageArtifact.GetPreviewDataUri());
+                return bytes != null && bytes.Length > 0;
+            }
+            catch (FormatException)
+            {
+                return false;
             }
         }
 
@@ -471,6 +535,11 @@ namespace Myrvo.FlowGraph
             if (forceExecute)
             {
                 reasons.Add("forced");
+            }
+
+            if (!node.CanReuseCachedOutputs)
+            {
+                reasons.Add("non-cacheable");
             }
 
             if (node.Dirty)
@@ -698,6 +767,11 @@ namespace Myrvo.FlowGraph
 
                     FlowNodeModel downstream = graphAsset.GetNodeById(edge.InputNodeId);
                     if (downstream == null)
+                    {
+                        continue;
+                    }
+
+                    if (downstream.Locked)
                     {
                         continue;
                     }

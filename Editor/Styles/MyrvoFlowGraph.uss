@@ -1,0 +1,44 @@
+.myrvo-flow-node-icon {
+    width: 16px;
+    min-width: 16px;
+    height: 16px;
+    min-height: 16px;
+    margin-left: 2px;
+    margin-right: 0;
+    padding-left: 0;
+    padding-right: 0;
+    background-color: transparent;
+    background-position-x: center;
+    background-position-y: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    -unity-background-image-tint-color: #898989;
+    border-top-width: 0;
+    border-right-width: 0;
+    border-bottom-width: 0;
+    border-left-width: 0;
+}
+
+.myrvo-flow-node-chevron--expanded {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=1797878245&guid=280607a96f2e2414487808dbe63696fe&type=3#chevron-up");
+}
+
+.myrvo-flow-node-chevron--collapsed {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=2104574845&guid=280607a96f2e2414487808dbe63696fe&type=3#chevron-right");
+}
+
+.myrvo-flow-node-play {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=139097201&guid=280607a96f2e2414487808dbe63696fe&type=3#chevron-play");
+}
+
+.myrvo-flow-node-stop {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=9807264&guid=280607a96f2e2414487808dbe63696fe&type=3#chevron-stop");
+}
+
+.myrvo-flow-node-lock--unlocked {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=1758449078&guid=280607a96f2e2414487808dbe63696fe&type=3#output_42");
+}
+
+.myrvo-flow-node-lock--locked {
+    background-image: url("project://database/Packages/com.deathbygravitystudio.myrvo/Editor/Resources/Icons/myrvo-icons.jpg?fileID=1488789590&guid=280607a96f2e2414487808dbe63696fe&type=3#output_43");
+}

@@ -1,8 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Serialization;
+#if UNITY_EDITOR
+using UnityEditor;
+using UnityEditorInternal;
+#endif
 
 namespace Myrvo.FlowGraph
 {
@@ -79,7 +85,7 @@ namespace Myrvo.FlowGraph
             return new[] { RequestKind };
         }
 
-        protected Task<FlowImageArtifact> ExecuteImageGenerationAsync(string prompt, IReadOnlyList<FlowImageArtifact> images, IReadOnlyDictionary<string, object> options = null)
+        protected async Task<FlowImageArtifact> ExecuteImageGenerationAsync(string prompt, IReadOnlyList<FlowImageArtifact> images, IReadOnlyDictionary<string, object> options = null)
         {
             FlowModelDefinition modelDefinition = FlowProviderPluginRegistry.GetModel(model);
             if (modelDefinition == null)
@@ -105,7 +111,13 @@ namespace Myrvo.FlowGraph
             };
 
             FlowProviderExecutionService service = new FlowProviderExecutionService();
-            return service.ExecuteImageRequestAsync(request);
+            FlowImageArtifact artifact = await service.ExecuteImageRequestAsync(request);
+            if (artifact == null)
+            {
+                throw new InvalidOperationException($"Model '{model}' completed the {RequestKind} request without returning an image artifact.");
+            }
+
+            return artifact;
         }
     }
 
@@ -168,19 +180,21 @@ namespace Myrvo.FlowGraph
 
         public override object EvaluateOutput(string portKey, FlowExecutionContext context, FlowExecutionServices services)
         {
-            return portKey switch
+            if (portKey != "image")
             {
-                "image" => new FlowImageArtifact
-                {
-                    Label = Title,
-                    Prompt = description,
-                    SourceKind = SourceKind,
-                    PreviewTexture = image,
-                    Metadata = image != null ? image.name : "No texture assigned",
-                    DataUri = image != null ? EncodeTextureToDataUri(image) : string.Empty,
-                    MimeType = "image/png"
-                },
-                _ => null
+                return null;
+            }
+
+            string dataUri = image != null ? EncodeTextureToDataUri(image) : string.Empty;
+            return new FlowImageArtifact
+            {
+                Label = Title,
+                Prompt = description,
+                SourceKind = SourceKind,
+                PreviewTexture = image,
+                Metadata = image != null ? image.name : "No texture assigned",
+                DataUri = dataUri,
+                MimeType = GetMimeType(dataUri)
             };
         }
 
@@ -190,6 +204,29 @@ namespace Myrvo.FlowGraph
             {
                 return string.Empty;
             }
+
+#if UNITY_EDITOR
+            string assetPath = AssetDatabase.GetAssetPath(texture);
+            if (!string.IsNullOrWhiteSpace(assetPath) && File.Exists(assetPath))
+            {
+                try
+                {
+                    byte[] sourceBytes = File.ReadAllBytes(assetPath);
+                    if (sourceBytes.Length > 0)
+                    {
+                        return $"data:{GetMimeTypeFromExtension(Path.GetExtension(assetPath))};base64,{Convert.ToBase64String(sourceBytes)}";
+                    }
+                }
+                catch (IOException)
+                {
+                    // Fall back to Unity's texture encoding path below.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Fall back to Unity's texture encoding path below.
+                }
+            }
+#endif
 
             try
             {
@@ -202,6 +239,33 @@ namespace Myrvo.FlowGraph
             {
                 return string.Empty;
             }
+        }
+
+        private static string GetMimeType(string dataUri)
+        {
+            if (!string.IsNullOrWhiteSpace(dataUri) && dataUri.StartsWith("data:image/jpeg", StringComparison.OrdinalIgnoreCase))
+            {
+                return "image/jpeg";
+            }
+
+            if (!string.IsNullOrWhiteSpace(dataUri) && dataUri.StartsWith("data:image/webp", StringComparison.OrdinalIgnoreCase))
+            {
+                return "image/webp";
+            }
+
+            return "image/png";
+        }
+
+        private static string GetMimeTypeFromExtension(string extension)
+        {
+            return extension.ToLowerInvariant() switch
+            {
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".webp" => "image/webp",
+                ".gif" => "image/gif",
+                ".bmp" => "image/bmp",
+                _ => "image/png"
+            };
         }
 
         private static byte[] EncodeNonReadableTextureToPng(Texture2D texture)
@@ -242,6 +306,159 @@ namespace Myrvo.FlowGraph
         }
 
         protected override string SourceKind => "image-upload";
+    }
+
+    [System.Serializable]
+    [FlowNode("Source/Capture Screenshot", "Capture Screenshot", "Source")]
+    public sealed class FlowCaptureScreenshotNodeModel : FlowCompanionNodeModel
+    {
+        [SerializeField, Range(1, 4)] private int superSize = 1;
+
+        public int SuperSize
+        {
+            get => superSize;
+            set => superSize = Mathf.Clamp(value, 1, 4);
+        }
+
+        public FlowCaptureScreenshotNodeModel()
+        {
+            SetTitle("Capture Screenshot");
+        }
+
+        public override bool CanReuseCachedOutputs => false;
+
+        protected override IEnumerable<FlowPortDescriptor> DescribeInputs()
+        {
+            yield break;
+        }
+
+        protected override IEnumerable<FlowPortDescriptor> DescribeOutputs()
+        {
+            yield return new FlowPortDescriptor("image", "Image", FlowValueType.Object);
+        }
+
+        public override void Execute(FlowExecutionContext context, FlowExecutionServices services)
+        {
+            Texture2D screenshot = CaptureScreenshot(Mathf.Clamp(superSize, 1, 4));
+            if (screenshot == null)
+            {
+                throw new InvalidOperationException("Unable to capture the current game screen.");
+            }
+
+            byte[] pngBytes = screenshot.EncodeToPNG();
+            if (pngBytes == null || pngBytes.Length == 0)
+            {
+                UnityEngine.Object.Destroy(screenshot);
+                throw new InvalidOperationException("Unable to encode the captured screenshot as PNG.");
+            }
+
+            FlowImageArtifact artifact = new FlowImageArtifact
+            {
+                Label = Title,
+                SourceKind = "screenshot",
+                PreviewTexture = screenshot,
+                Metadata = $"{screenshot.width} x {screenshot.height} game screenshot",
+                DataUri = $"data:image/png;base64,{Convert.ToBase64String(pngBytes)}",
+                MimeType = "image/png"
+            };
+
+            StoreOutput(services, "image", artifact);
+        }
+
+        private static Texture2D CaptureScreenshot(int resolutionScale)
+        {
+#if UNITY_EDITOR
+            return CaptureEditorGameView(resolutionScale);
+#else
+            return ScreenCapture.CaptureScreenshotAsTexture(resolutionScale);
+#endif
+        }
+
+#if UNITY_EDITOR
+        private static Texture2D CaptureEditorGameView(int resolutionScale)
+        {
+            EditorWindow gameView = FindGameView();
+            if (gameView == null)
+            {
+                throw new InvalidOperationException("Capture Screenshot requires an open Game view.");
+            }
+
+            Rect targetInView = GetGameViewTargetRect(gameView);
+            float pixelsPerPoint = EditorGUIUtility.pixelsPerPoint;
+            int width = Mathf.RoundToInt(targetInView.width * pixelsPerPoint);
+            int height = Mathf.RoundToInt(targetInView.height * pixelsPerPoint);
+            if (width <= 0 || height <= 0)
+            {
+                throw new InvalidOperationException("The Game view does not have a valid drawable size.");
+            }
+
+            Vector2 screenPosition = (gameView.position.position + targetInView.position) * pixelsPerPoint;
+            Color[] pixels = InternalEditorUtility.ReadScreenPixel(screenPosition, width, height);
+            if (pixels == null || pixels.Length != width * height)
+            {
+                throw new InvalidOperationException("Unable to read pixels from the Game view. Ensure the Game view is visible.");
+            }
+
+            Texture2D screenshot = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            screenshot.SetPixels(pixels);
+            screenshot.Apply(false, false);
+            return ScaleEditorScreenshot(screenshot, resolutionScale);
+        }
+
+        private static Rect GetGameViewTargetRect(EditorWindow gameView)
+        {
+            PropertyInfo targetInView = gameView.GetType().GetProperty("targetInView", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (targetInView?.GetValue(gameView) is Rect targetRect && targetRect.width > 0f && targetRect.height > 0f)
+            {
+                return targetRect;
+            }
+
+            throw new InvalidOperationException("Unity could not determine the Game view's rendered image area.");
+        }
+
+        private static EditorWindow FindGameView()
+        {
+            foreach (EditorWindow window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            {
+                if (window != null && window.GetType().FullName == "UnityEditor.GameView")
+                {
+                    return window;
+                }
+            }
+
+            return null;
+        }
+
+        private static Texture2D ScaleEditorScreenshot(Texture2D source, int resolutionScale)
+        {
+            if (resolutionScale <= 1)
+            {
+                return source;
+            }
+
+            int width = source.width * resolutionScale;
+            int height = source.height * resolutionScale;
+            RenderTexture temporary = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            RenderTexture previous = RenderTexture.active;
+            Texture2D scaled = null;
+
+            try
+            {
+                Graphics.Blit(source, temporary);
+                RenderTexture.active = temporary;
+                scaled = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                scaled.ReadPixels(new Rect(0f, 0f, width, height), 0, 0);
+                scaled.Apply(false, false);
+                return scaled;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(temporary);
+                UnityEngine.Object.DestroyImmediate(source);
+            }
+        }
+#endif
     }
 
     [System.Serializable]

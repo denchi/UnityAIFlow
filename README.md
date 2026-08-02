@@ -30,6 +30,7 @@ On this machine, the installed editor is `Unity 2021.3.45f2`, and the discoverab
 
 - `Text Input`
 - `Image`
+- `Capture Screenshot`
 - `Text to Image`
 - `Image to Image`
 - `Image to Image (2 Inputs)`

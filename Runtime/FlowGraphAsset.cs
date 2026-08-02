@@ -106,7 +106,7 @@ namespace Myrvo.FlowGraph
         {
             foreach (FlowNodeModel node in nodes)
             {
-                if (node == null)
+                if (node == null || node.Locked)
                 {
                     continue;
                 }
@@ -139,13 +139,15 @@ namespace Myrvo.FlowGraph
                 }
 
                 FlowNodeModel currentNode = GetNodeById(currentNodeId);
-                if (currentNode != null)
+                if (currentNode == null || currentNode.Locked)
                 {
-                    currentNode.Dirty = true;
-                    currentNode.Status = FlowNodeExecutionStatus.Dirty;
-                    currentNode.LastError = string.Empty;
-                    currentNode.LastExecutionSummary = string.Empty;
+                    continue;
                 }
+
+                currentNode.Dirty = true;
+                currentNode.Status = FlowNodeExecutionStatus.Dirty;
+                currentNode.LastError = string.Empty;
+                currentNode.LastExecutionSummary = string.Empty;
 
                 foreach (FlowEdgeModel edge in edges)
                 {
@@ -179,6 +181,26 @@ namespace Myrvo.FlowGraph
             }
 
             RepairInvalidEdges();
+        }
+
+        /// <summary>
+        /// Removes preview payloads duplicated by an output snapshot's canonical artifact data.
+        /// Safe to invoke repeatedly; returns true only when this asset changed.
+        /// </summary>
+        public bool OptimizePersistedPreviewData()
+        {
+            if (nodes == null)
+            {
+                return false;
+            }
+
+            bool changed = false;
+            foreach (FlowNodeModel node in nodes)
+            {
+                changed |= node?.OptimizePersistedPreviewData() ?? false;
+            }
+
+            return changed;
         }
 
         private void RepairInvalidEdges()

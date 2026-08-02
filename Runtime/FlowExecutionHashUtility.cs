@@ -37,6 +37,14 @@ namespace Myrvo.FlowGraph
                 return "<null>";
             }
 
+            // Unity keeps a managed wrapper after the native object has been
+            // destroyed. Check its overloaded null state before reading any
+            // properties such as Texture2D.name.
+            if (value is UnityEngine.Object unityValue && unityValue == null)
+            {
+                return "<null-object>";
+            }
+
             switch (value)
             {
                 case string stringValue:
