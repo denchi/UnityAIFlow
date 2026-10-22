@@ -1,6 +1,6 @@
 # Myrvo FlowGraph
 
-Myrvo FlowGraph (`com.deathbygravitystudio.myrvo`) is a Unity package for authoring and running ScriptableObject flow graphs that pass text, images, video, and audio between nodes, with image generation through OpenAI and Google Gemini.
+Myrvo FlowGraph (`com.deathbygravitystudio.myrvo`) is a Unity editor and runtime for connecting text, image, video, and audio nodes. Its image-generation providers are OpenAI and Google Gemini.
 
 ## Features
 
